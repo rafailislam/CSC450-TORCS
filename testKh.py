@@ -14,6 +14,8 @@ from ReplayBuffer import ReplayBuffer
 from OUActionNoise import OUActionNoise
 import json
 
+HIDDEN1_NODES = 300
+HIDDEN2_NODES =  600
 # --------------------- define actor and critic model-------------------
 def get_actor(state_size):
   # build your model here
