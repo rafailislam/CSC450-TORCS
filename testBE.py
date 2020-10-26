@@ -13,7 +13,7 @@ from tensorflow.python.framework.ops import disable_eager_execution
 from ReplayBuffer import ReplayBuffer
 from OUActionNoise import OUActionNoise
 import json
-
+noise = OUActionNoise()
 HIDDEN1_NODES = 300
 HIDDEN2_NODES = 600
 
@@ -34,6 +34,7 @@ def get_actor(state_size,action_space):
   model = ks.Model(inputs=x,outputs=V)
 
   return model
+
 
 def get_critic(state_size,action_space): #THIS WAS INDENTED FOR SOME REASON??
 
@@ -56,16 +57,15 @@ def get_critic(state_size,action_space): #THIS WAS INDENTED FOR SOME REASON??
 
 #autograph  # same as update function
 @tf.function
-def trainmodel(self, state_batch, action_batch, reward_batch, next_state_batch,):
+def update(actor_model,critic_model,states,actions,y,actor_optimizer,critic_optimizer):
     # here you need to update weights, loss
     # Training and updating Actor & Critic networks.
     # See Pseudo Code.
+    y = tf.cast(y, dtype=tf.float32)
+    
     with tf.GradientTape() as tape:
-        target_actions = target_actor(next_state_batch, training=True)
-        y = reward_batch + gamma * target_critic(
-            [next_state_batch, target_actions], training=True
-        )
-        critic_value = critic_model([state_batch, action_batch], training=True)
+       
+        critic_value = critic_model([states, actions], training=True)
         critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
 
     critic_grad = tape.gradient(critic_loss, critic_model.trainable_variables)
@@ -74,8 +74,8 @@ def trainmodel(self, state_batch, action_batch, reward_batch, next_state_batch,)
     )
 
     with tf.GradientTape() as tape:
-        actions = actor_model(state_batch, training=True)
-        critic_value = critic_model([state_batch, actions], training=True)
+        actions = actor_model(states, training=True)
+        critic_value = critic_model([states, actions], training=True)
         # Used `-value` as we want to maximize the value given
         # by the critic for our actions
         actor_loss = -tf.math.reduce_mean(critic_value)
@@ -84,7 +84,21 @@ def trainmodel(self, state_batch, action_batch, reward_batch, next_state_batch,)
     actor_optimizer.apply_gradients(
         zip(actor_grad, actor_model.trainable_variables)
     )
+    return critic_loss
 
+
+@tf.function
+def target_values(new_states, target_actor,target_critic):
+    
+    # target action for batch size new_states
+    target_actions = target_actor(new_states)
+    
+    #tf.print("target_actions",type(target_actions))
+    #tf.print(type(new_states))
+    
+    # target Qvalue for the batch size
+    target_q_values = target_critic([new_states,target_actions ])  
+    return target_q_values
 
 @tf.function
 def train_target(target_weights, weights, tau):
@@ -117,23 +131,22 @@ def trainTorcs(train_indicator=0):
     step = 0
     epsilon = 1
     
-    hidden_unit1 = 1
-    hidden_unit2 = 2
+  
   #-----------------------Create buffer here-----------------------
 
   # TODO: add noise 
 
     buff = ReplayBuffer(BUFFER_SIZE)    #Create replay buffer, using Replay buffer class
     # create model for actor and critic
-    actor_model  = get_actor(hidden_unit1, hidden_unit2)
-    critic_model = get_critic(hidden_unit1, hidden_unit2)
+    actor_model  = get_actor(state_dim, action_dim)
+    critic_model = get_critic(state_dim, action_dim)
 
     #actor_model.summary()
     #critic_model.summary() 
 
     # create target actor and critic
-    target_actor = get_actor(hidden_unit1, hidden_unit2)
-    target_critic = get_critic(hidden_unit1, hidden_unit2)
+    target_actor = get_actor(state_dim, action_dim)
+    target_critic = get_critic(state_dim, action_dim)
 
     # initialize target weights same as acot and critic (default) weights
     target_actor.set_weights(actor_model.get_weights())
@@ -168,102 +181,122 @@ def trainTorcs(train_indicator=0):
     for i in range(episode_count):
 
         print("Episode : " + str(i) + " Replay Buffer " + str(buff.count()))
-
+        
         if np.mod(i, 3) == 0:
             ob = env.reset(relaunch=True)   #relaunch TORCS every 3 episode because of the memory leak error
         else:
             ob = env.reset()
-
+            
         s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY,  ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm))
-        
         total_reward = 0.
-        # TODO: follow code in torcs
-
+        
         for j in range(max_steps):
+            
             loss = 0 
             epsilon -= 1.0 / EXPLORE
-            a_t = np.zeros([1,action_dim])    
-            noise_t = np.zeros([1,action_dim])    
-            s_t = tf.expand_dims(tf.convert_to_tensor(s_t, dtype=tf.float32), 0)
-
-            # a_t original predict action with current state
-            a_t_original = actor.model.predict(s_t.reshape(1, s_t.shape[0]))
-
+            a_t = np.zeros([1,action_dim])
+            noise_t = np.zeros([1,action_dim])
+           
+            s_t = tf.expand_dims(tf.convert_to_tensor(s_t, dtype=tf.float32),0)
+            
+            
+            # predict action with current state
+            a_t_original = actor_model(s_t)
+            #print("--------------")
+            #print(type(a_t_original) )
+            #print("act ", a_t_original.shape)
+            
             # add noise for exploration
-            noise_t[0][0] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][0])
-            noise_t[0][1] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][1])
-            noise_t[0][2] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][2])
-
-            # The following code do the stochastic brake
+            noise_t[0][0] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][0],  0.0 , 0.60, 0.30)
+            noise_t[0][1] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][1],  0.5 , 1.00, 0.10)
+            noise_t[0][2] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][2], -0.1 , 1.00, 0.05)
+            #The following code do the stochastic brake
             if random.random() <= 0.1:
-                noise_t[0][2] = train_indicator * max(epsilon, 0 ) * noise.generate_noise(a_t_original)   
+                #print("********Now we apply the brake***********")
+                noise_t[0][2] = train_indicator * max(epsilon, 0) * noise.generate_noise(a_t_original[0][2],  0.2 , 1.00, 0.10)
 
-            a_t[0][0] = a_t_original[0][0]  * noise_t[0][0]
-            a_t[0][1] = a_t_original[0][1]  * noise_t[0][1]
-            a_t[0][2] = a_t_original[0][2]  * noise_t[0][2]
-
+            a_t[0][0] = a_t_original[0][0] + noise_t[0][0]
+            a_t[0][1] = a_t_original[0][1] + noise_t[0][1]
+            a_t[0][2] = a_t_original[0][2] + noise_t[0][2]
+            
+            
+            # next step with predicted action, next observation
             ob, r_t, done, info = env.step(a_t[0])
-
+            
+            # get next state
             s_t1 = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm))
-
-
-            s_t1 = tf.convert_to_tensor(s_t1, dtype = tf.float32)
-
-            buff.add(s_t, a_t[0], r_t, s_t1, done)   
-
+            
+            
+            #print(a_t[0])
+            s_t1 = tf.convert_to_tensor(s_t1,dtype=tf.float32)
+            # record current_state, action, reward, next_state, finished?
+            buff.add(s_t[0], a_t[0], r_t, s_t1, done)      #Add replay buffer
+            
             #Do the batch update
-            batch = buff.getBatch(BATCH_SIZE)
+            # draw random sample from buffer of batch size
+            batch = buff.getBatch(BATCH_SIZE) 
+            
             states = np.asarray([e[0] for e in batch])
             actions = np.asarray([e[1] for e in batch])
             rewards = np.asarray([e[2] for e in batch])
             new_states = np.asarray([e[3] for e in batch])
             dones = np.asarray([e[4] for e in batch])
-            y_t = np.asarray([e[2] for e in batch])
+            y_t = np.asarray([e[1] for e in batch])
             
-
-        states = tf.convert_to_tensor(states, dtype=tf.float32)
-        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
-        new_states = tf.convert_to_tensor(new_states, dtype=tf.float32)
-
-        target_q_values = target_values(new_states, target_actor, target_critic)
-
-        # Discounted Qvalues
-        for k in range(len(batch)):
-            if dones[k]:
-                y_t[k] = rewards[k]
-            else:
-                y_t[k] = rewards[k] + GAMMA*target_q_values[k]
-
-        # updating target actor and target critic
-        if (train_indicator):
-            loss += update(actor_model, critic_model, states, y_t, actor_optimizer, critic_optimizer)
-            update_target(target_actor.variables, actor_model.variables, TAU)
-            update_target(target_critic.variables, actor_model.variables, TAU)
+            
+            states = tf.convert_to_tensor(states, dtype=tf.float32)
+            actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+            new_states = tf.convert_to_tensor(new_states, dtype=tf.float32)
+            
+            
+            target_q_values = target_values(new_states,target_actor,target_critic)
+           
+            
+            # discounted Qvalues
+            for k in range(len(batch)):
+                if dones[k]:
+                    y_t[k] = rewards[k]
+                else:
+                    y_t[k] = rewards[k] + GAMMA*target_q_values[k]
+            
+            
+            if (train_indicator):
+                
+                loss += update(actor_model,critic_model,states,actions,y_t,actor_optimizer,critic_optimizer)
+                
+                # update target actor and target critic
+            
+                train_target(target_actor.variables, actor_model.variables, TAU)
+                train_target(target_critic.variables, critic_model.variables, TAU)
+                
+            total_reward += r_t
+            s_t = s_t1
         
-        total_reward += r_t
-        s_t = s_t1
-    
-        if np.mod(j,100) == 0: 
-            print("Episode", i, "Step", step, "Action", a_t, "Reward", r_t, "Loss", loss)
+            print("Episode", i, "Step", step, "Reward: %.3f"%r_t, "Loss: %.3f"%loss)
+# =============================================================================
+#             if step%100==0:
+#                 print("Episode", i, "Step", step, "Reward: %.3f"%r_t, "Loss: %.3f"%loss)   
+# =============================================================================
+            step += 1
+            if done:
+                break
+            
+            
+        if np.mod(i, 3) == 0:
+            if (train_indicator):
+                print("Now we save model")
+                actor_model.save_weights("actormodel.h5", overwrite=True)
+                with open("actormodel.json", "w") as outfile:
+                    json.dump(actor_model.to_json(), outfile)
+
+                critic_model.save_weights("criticmodel.h5", overwrite=True)
+                with open("criticmodel.json", "w") as outfile:
+                    json.dump(critic_model.to_json(), outfile)
+                #print("----------------------\nsaving weights\n------------------------")
         
-        step += 1
-        if done:
-            break
-
-    if np.mod(i, 3) == 0:
-        if (train_indicator):
-            print("Now we save model")
-            actor.model.save_weights("actormodel.h5", overwrite=True)
-            with open("actormodel.json", "w") as outfile:
-                json.dump(actor.model.to_json(), outfile)
-
-            critic.model.save_weights("criticmodel.h5", overwrite=True)
-            with open("criticmodel.json", "w") as outfile:
-                json.dump(critic.model.to_json(), outfile)
-
-    print("TOTAL REWARD @ " + str(i) +"-th Episode  : Reward " + str(total_reward))
-    print("Total Step: " + str(step))
-    print("")
+        print("TOTAL REWARD @ " + str(i) +"-th Episode  : Reward " + str(total_reward))
+        print("Total Step: " + str(step))
+        print("")
 
     env.end()  # This is for shutting down TORCS
     print("Finish.")
